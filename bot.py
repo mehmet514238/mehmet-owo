@@ -3,11 +3,13 @@ from discord.ext import commands
 import sqlite3
 import os
 from dotenv import load_dotenv
-import subprocess
+import requests
+import time
 
 # .env dosyasındaki bot token'ını yükleyin
 load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
+API_KEY = os.getenv("CAPTCHA_API_KEY")
 
 # Veritabanı bağlantısını başlatın
 conn = sqlite3.connect("owo_data.db")
@@ -30,7 +32,37 @@ intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# Komutlar burada devam eder...
+# CAPTCHA çözümü için yardımcı fonksiyonlar
+def solve_captcha(captcha_site_key, page_url):
+    url = 'http://2captcha.com/in.php'
+    params = {
+        'key': API_KEY,
+        'method': 'userrecaptcha',
+        'googlekey': captcha_site_key,
+        'pageurl': page_url,
+        'json': 1
+    }
+    
+    response = requests.post(url, data=params)
+    result = response.json()
+    
+    if result['status'] == 1:
+        return result['request']
+    else:
+        return None
+
+def get_captcha_solution(captcha_id):
+    url = f'http://2captcha.com/res.php?key={API_KEY}&action=get&id={captcha_id}&json=1'
+    
+    while True:
+        response = requests.get(url)
+        result = response.json()
+        
+        if result['status'] == 1:
+            return result['request']
+        time.sleep(5)
+
+# Bot olayları
 @bot.event
 async def on_ready():
     print(f'{bot.user} olarak giriş yapıldı.')
@@ -57,80 +89,29 @@ async def kar_zarar(ctx):
         await ctx.send("Öncelikle kaydolmanız gerekiyor.")
 
 @bot.command()
-async def yardım(ctx):
-    yardım_metni = """
-    **Mevcut Komutlar:**
-    - `!kayit`: Bot veritabanına kaydolmanızı sağlar.
-    - `!kar_zarar`: Şu anki kâr-zarar durumunuzu gösterir.
-    - `!randoms aç/kapa`: Rastgele mesajları açar veya kapatır.
-    - `!captchaprotect aç/kapa`: CAPTCHA korumasını açar veya kapatır.
-    - `!captchaprotect cf_limit <sayı>`: CAPTCHA mesaj limitini ayarlar.
-    - `!repo_guncelle`: GitHub reposunu günceller.
-    """
-    await ctx.send(yardım_metni)
-
-# Diğer komutlar ve event handler'lar...
-@bot.event
-async def on_message(message):
-    owo_bot_id = 408785106942164992  # OwO bot ID'si
+async def captcha_doğrula(ctx):
+    discord_id = ctx.author.id
+    cursor.execute("SELECT captcha_status FROM users WHERE discord_id = ?", (discord_id,))
+    result = cursor.fetchone()
     
-    if message.author.id == owo_bot_id:
-        match = re.search(r'(Kazandınız|Zarar ettiniz)\s+(\d+)', message.content)
+    if result and result[0] == 1:  # CAPTCHA doğrulama aktifse
+        captcha_site_key = 'your_google_recaptcha_site_key'
+        page_url = 'https://yourcaptchaurl.com'  # CAPTCHA'nın bulunduğu URL
         
-        if match:
-            sonuc = match.group(1)
-            miktar = int(match.group(2))
-            user_id = message.mentions[0].id
-
-            cursor.execute("SELECT * FROM users WHERE discord_id = ?", (user_id,))
-            result = cursor.fetchone()
-
-            if result:
-                kar_zarar = result[1] + miktar if sonuc == "Kazandınız" else result[1] - miktar
-                cursor.execute("UPDATE users SET kar_zarar = ? WHERE discord_id = ?", (kar_zarar, user_id))
+        captcha_id = solve_captcha(captcha_site_key, page_url)
+        
+        if captcha_id:
+            solution = get_captcha_solution(captcha_id)
+            if solution:
+                cursor.execute("UPDATE users SET captcha_status = 1 WHERE discord_id = ?", (discord_id,))
                 conn.commit()
-                await message.channel.send(f"{message.mentions[0].mention}, kâr-zarar durumu güncellendi: {kar_zarar}")
+                await ctx.send(f"{ctx.author.name} başarıyla doğrulandı!")
             else:
-                await message.channel.send(f"{message.mentions[0].mention}, öncelikle kaydolmanız gerekiyor.")
-    
-    await bot.process_commands(message)
-
-@bot.command()
-async def randoms(ctx, status: str):
-    if status.lower() in ["aç", "kapa"]:
-        new_status = 1 if status.lower() == "aç" else 0
-        cursor.execute("UPDATE users SET random_status = ? WHERE discord_id = ?", (new_status, ctx.author.id))
-        conn.commit()
-        await ctx.send(f"{ctx.author.name}, random mesajlar {'açıldı' if new_status else 'kapandı'}.")
+                await ctx.send(f"{ctx.author.name}, CAPTCHA doğrulaması başarısız.")
+        else:
+            await ctx.send(f"{ctx.author.name}, CAPTCHA çözümü alınamadı.")
     else:
-        await ctx.send("Geçersiz komut. Lütfen 'aç' veya 'kapa' yazın.")
-
-@bot.command()
-async def captchaprotect(ctx, *args):
-    if len(args) == 1:
-        status = 1 if args[0].lower() == "aç" else 0
-        cursor.execute("UPDATE users SET captcha_status = ? WHERE discord_id = ?", (status, ctx.author.id))
-        conn.commit()
-        await ctx.send(f"{ctx.author.name}, CAPTCHA koruması {'açıldı' if status else 'kapandı'}.")
-    elif len(args) == 2 and args[0].lower() == "cf_limit":
-        try:
-            limit = int(args[1])
-            cursor.execute("UPDATE users SET captcha_limit = ? WHERE discord_id = ?", (limit, ctx.author.id))
-            conn.commit()
-            await ctx.send(f"{ctx.author.name}, CAPTCHA mesaj limiti {limit} olarak ayarlandı.")
-        except ValueError:
-            await ctx.send("Lütfen geçerli bir sayı girin.")
-    else:
-        await ctx.send("Geçersiz komut.")
-
-@bot.command()
-async def repo_guncelle(ctx):
-    await ctx.send("GitHub reposu güncelleniyor...")
-    try:
-        subprocess.run(["git", "pull", "origin", "main"], check=True)
-        await ctx.send("GitHub reposu başarıyla güncellendi.")
-    except subprocess.CalledProcessError:
-        await ctx.send("GitHub repo güncellenirken bir hata oluştu.")
+        await ctx.send(f"{ctx.author.name}, CAPTCHA koruması aktif değil veya doğrulama yapılmamış.")
 
 # Bot'u çalıştır
 bot.run(TOKEN)
